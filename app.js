@@ -199,7 +199,11 @@ $("deleteBtn").addEventListener("click", async () => {
   const path = state.editingImagePath;
   const { error } = await sb.from("receipts").delete().eq("id", state.editingId);
   if (error) { $("formMsg").textContent = "削除できませんでした: " + error.message; return; }
-  if (path) await sb.storage.from("receipts").remove([path]);
+  if (path) {
+    // 複数枚読み取りで同じ写真を共有している下書きが残っていれば写真は消さない
+    const { data: sharing } = await sb.from("receipts").select("id").eq("image_path", path).limit(1);
+    if (!sharing || sharing.length === 0) await sb.storage.from("receipts").remove([path]);
+  }
   resetForm(); await loadHome(); await loadList(); await loadSummary();
 });
 $("saveBtn").addEventListener("click", async () => {
@@ -259,13 +263,14 @@ $("aiBtn").addEventListener("click", async () => {
   try {
     const base64 = await fileToBase64(state.imageFile);
     const prompt = [
-      "このレシート・領収書の写真から情報を読み取り、JSONだけを返してください。",
-      "形式: {\"date\":\"YYYY-MM-DD\",\"store\":\"店名\",\"amount\":合計金額の数値,\"items\":\"品目の要約\",\"category\":\"科目\"}",
+      "この写真に写っているレシート・領収書をすべて読み取り、JSON配列だけを返してください。",
+      "写真に複数枚のレシートが写っている場合は、1枚ごとに1つの要素に分けてください。1枚だけなら要素1つの配列にしてください。",
+      "各要素の形式: {\"date\":\"YYYY-MM-DD\",\"store\":\"店名\",\"amount\":合計金額の数値,\"items\":\"品目の要約\",\"category\":\"科目\"}",
       "科目は次の15科目から1つだけ選んでください: " + CATEGORIES.join("／"),
       "分類の目安: 沖縄電力・電気料金→電気代、りゅうせきガス・ガス料金→ガス代、水道局・上下水道料金→水道代、",
       "ガソリンスタンド・燃料→ガソリン代、電話・通信→通信費、車の修理・部品→修繕費・外注工賃、",
       "日用品・消耗品→消耗品費、保険→損害保険料、税金・公的料金→租税公課、判断できない場合は雑費。",
-      "読み取れない項目は空文字または0にしてください。説明文は付けずJSONのみ返してください。"
+      "読み取れない項目は空文字または0にしてください。説明文は付けずJSON配列のみ返してください。"
     ].join("\n");
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(key)}`,
@@ -278,16 +283,53 @@ $("aiBtn").addEventListener("click", async () => {
     if (!res.ok) throw new Error("Gemini API エラー: " + res.status);
     const j = await res.json();
     const text = (((j.candidates || [])[0] || {}).content || {}).parts?.map((p) => p.text || "").join("") || "";
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error("読み取り結果を解釈できませんでした");
-    const r = JSON.parse(m[0]);
-    if (r.date) $("fDate").value = r.date;
-    if (r.store) $("fStore").value = r.store;
-    if (r.amount) $("fAmount").value = r.amount;
-    if (r.items) $("fItems").value = r.items;
-    if (r.category && CATEGORIES.includes(r.category)) $("fCategory").value = r.category;
-    $("fConfirmed").checked = false; // 読み取り結果は未確認の下書きとして保存する
-    $("aiNote").textContent = "読み取りました。内容を確認してから保存してください（未確認の下書きになります）。";
+    let results = null;
+    const am = text.match(/\[[\s\S]*\]/);
+    if (am) { try { results = JSON.parse(am[0]); } catch (_) { results = null; } }
+    if (!results) {
+      const om = text.match(/\{[\s\S]*\}/);
+      if (om) { try { results = [JSON.parse(om[0])]; } catch (_) { results = null; } }
+    }
+    if (!Array.isArray(results) || results.length === 0) throw new Error("読み取り結果を解釈できませんでした");
+    if (results.length === 1) {
+      const r = results[0];
+      if (r.date) $("fDate").value = r.date;
+      if (r.store) $("fStore").value = r.store;
+      if (r.amount) $("fAmount").value = r.amount;
+      if (r.items) $("fItems").value = r.items;
+      if (r.category && CATEGORIES.includes(r.category)) $("fCategory").value = r.category;
+      $("fConfirmed").checked = false; // 読み取り結果は未確認の下書きとして保存する
+      $("aiNote").textContent = "読み取りました。内容を確認してから保存してください（未確認の下書きになります）。";
+      return;
+    }
+    // 複数枚: 写真を1回だけアップロードし、各レシートを未確認の下書きとして一括保存する
+    const ext = (state.imageFile.name.split(".").pop() || "jpg").toLowerCase();
+    const path = `${state.user.id}/${Date.now()}.${ext}`;
+    const { error: upErr } = await sb.storage.from("receipts")
+      .upload(path, state.imageFile, { contentType: state.imageFile.type || "image/jpeg" });
+    if (upErr) throw upErr;
+    let saved = 0, skipped = 0;
+    for (const r of results) {
+      const amount = parseInt(r.amount, 10);
+      if (!r.date || Number.isNaN(amount)) { skipped++; continue; }
+      const row = {
+        user_id: state.user.id, receipt_date: r.date,
+        store_name: String(r.store || ""), amount,
+        category: CATEGORIES.includes(r.category) ? r.category : "雑費",
+        items_text: String(r.items || ""), usage: "未確認",
+        memo: "複数枚読み取り（同じ写真から一括登録）", confirmed: false, image_path: path
+      };
+      const { error } = await sb.from("receipts").insert(row);
+      if (error) { skipped++; } else { saved++; }
+    }
+    $("aiNote").textContent = saved > 0
+      ? `${results.length}枚のレシートを読み取り、${saved}件を未確認の下書きとして保存しました${skipped ? `（${skipped}件は読み取れず除外）` : ""}。一覧タブで1件ずつ確認してください。`
+      : "複数枚として読み取りましたが、保存できるレシートがありませんでした。1枚ずつ撮り直してください。";
+    resetForm();
+    $("aiNote").textContent = saved > 0
+      ? `${saved}件の下書きを保存しました。一覧タブで確認してください。`
+      : "保存できるレシートがありませんでした。1枚ずつ撮り直してください。";
+    await loadHome(); await loadList(); await loadSummary();
   } catch (e) {
     $("aiNote").textContent = "読み取りに失敗しました: " + (e.message || e) + "（手入力で保存できます）";
   } finally { $("aiBtn").disabled = false; }
