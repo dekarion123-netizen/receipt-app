@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>レシート仕分け（独立版）</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+</head>
+<body>
+<header>
+  <h1>レシート仕分け</h1>
+  <span id="userEmail" class="muted"></span>
+  <button id="logoutBtn" class="hidden">ログアウト</button>
+</header>
+<main>
+  <!-- ログイン -->
+  <section id="loginView" class="card hidden">
+    <h2>ログイン</h2>
+    <label>メールアドレス</label>
+    <input id="loginEmail" type="email" autocomplete="username">
+    <label>パスワード</label>
+    <input id="loginPassword" type="password" autocomplete="current-password">
+    <p><button id="loginBtn" class="primary" style="width:100%">ログイン</button></p>
+    <p id="loginError" class="muted"></p>
+  </section>
+
+  <!-- アプリ本体 -->
+  <section id="appView" class="hidden">
+    <div class="tabs">
+      <button data-tab="home" class="active">ホーム</button>
+      <button data-tab="list">一覧</button>
+      <button data-tab="summary">集計・転記</button>
+      <button data-tab="settings">設定</button>
+    </div>
+
+    <!-- ホーム：登録フォーム＋今月の概要 -->
+    <div id="tab-home">
+      <div class="card">
+        <h2 id="formTitle">レシートを追加</h2>
+        <label>写真（撮影または選択）</label>
+        <input id="fImage" type="file" accept="image/*">
+        <img id="fPreview" class="preview hidden" alt="レシート写真プレビュー">
+        <p id="aiRow"><button id="aiBtn" type="button">写真をAIで読み取る</button>
+        <span id="aiNote" class="muted"></span></p>
+        <div class="row">
+          <div><label>日付</label><input id="fDate" type="date"></div>
+          <div><label>金額（円）</label><input id="fAmount" type="number" inputmode="numeric" min="0"></div>
+        </div>
+        <label>店名</label>
+        <input id="fStore" type="text">
+        <label>品目</label>
+        <textarea id="fItems" rows="2"></textarea>
+        <div class="row">
+          <div><label>科目</label><select id="fCategory"></select></div>
+          <div><label>用途</label>
+            <select id="fUsage">
+              <option>事業用</option><option>プライベート</option><option selected>未確認</option>
+            </select></div>
+        </div>
+        <label>メモ</label>
+        <input id="fMemo" type="text">
+        <label style="display:flex;gap:8px;align-items:center;color:var(--text);font-size:15px;">
+          <input id="fConfirmed" type="checkbox" style="width:auto"> 確認済みにする
+        </label>
+        <p class="row">
+          <button id="saveBtn" class="primary">保存する</button>
+          <button id="cancelEditBtn" class="hidden">編集をやめる</button>
+          <button id="deleteBtn" class="danger hidden">削除</button>
+        </p>
+        <p id="formMsg" class="muted"></p>
+      </div>
+      <div class="card">
+        <h2>今月（<span id="homeMonthLabel"></span>）</h2>
+        <p>合計 <span class="big" id="homeTotal">-</span> ／ <span id="homeCount">-</span>件
+           ／ 未確認 <span id="homeUnconfirmed">-</span>件</p>
+        <div id="homeRecent"></div>
+      </div>
+    </div>
+
+    <!-- 一覧 -->
+    <div id="tab-list" class="hidden">
+      <div class="card">
+        <div class="row" style="align-items:flex-end;">
+          <div><label>月</label><input id="listMonth" type="month"></div>
+          <div><label>科目で絞る</label><select id="listCategory"><option value="">すべて</option></select></div>
+        </div>
+        <div class="row" style="align-items:flex-end;">
+          <div><label>店名検索</label><input id="listSearch" type="text" placeholder="店名の一部"></div>
+          <div><label style="display:flex;gap:8px;align-items:center;color:var(--text);font-size:15px;margin-top:26px;">
+            <input id="listUnconfirmedOnly" type="checkbox" style="width:auto"> 未確認のみ</label></div>
+        </div>
+        <p class="muted" id="listInfo"></p>
+        <div id="listBody"></div>
+      </div>
+    </div>
+
+    <!-- 集計・転記 -->
+    <div id="tab-summary" class="hidden">
+      <div class="card">
+        <div class="row" style="align-items:flex-end;">
+          <div><label>月</label><input id="sumMonth" type="month"></div>
+          <div><button id="sumReload">集計する</button></div>
+        </div>
+        <h3>科目別集計</h3>
+        <div id="sumBars"></div>
+        <p>月合計 <b id="sumTotal">-</b> ／ 年間累計 <b id="sumYearTotal">-</b></p>
+        <p><button id="csvBtn">CSV書き出し（明細＋科目別集計）</button></p>
+      </div>
+      <div class="card">
+        <h3>Excelへ転記プレビュー</h3>
+        <p class="muted">対象は<b>確認済み</b>のレシートのみ。転記先シートは収入年の翌年シートです（例：2026年分 → 「2027年」シート）。</p>
+        <div id="transferInfo"></div>
+        <div id="transferBody"></div>
+        <p><button id="transferCsvBtn">転記用CSV（科目名,金額）</button></p>
+      </div>
+    </div>
+
+    <!-- 設定 -->
+    <div id="tab-settings" class="hidden">
+      <div class="card">
+        <h2>設定</h2>
+        <label>Gemini APIキー（写真のAI読み取り用）</label>
+        <input id="geminiKey" type="password" placeholder="未設定の場合は手入力モードになります">
+        <p class="muted">キーはこのブラウザの中（localStorage）にだけ保存されます。送信先はGoogle Geminiへの読み取りリクエストのみです。取得手順は SETUP.md を参照。</p>
+        <p><button id="saveKeyBtn" class="primary">キーを保存</button>
+        <button id="clearKeyBtn">キーを消す</button></p>
+        <p id="keyMsg" class="muted"></p>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
