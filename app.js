@@ -8,7 +8,7 @@ const CATEGORIES = [
   "接待交際費", "損害保険料", "修繕費・外注工賃", "消耗品費", "福利厚生費・研修費",
   "給料・賃金", "地代・家賃", "雑費"
 ];
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.5-flash";
 const LS_KEY = "receipt_app_gemini_key";
 
 const cfg = window.RECEIPT_APP_CONFIG || {};
